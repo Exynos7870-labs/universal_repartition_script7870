@@ -14,17 +14,31 @@
 #
 # Universal repartitioner for the 7870, V1.0
 # Written by @Astrako
-# values edited by debie/TheObcd in order to fit his LineageOS releases
+# https://github.com/Astrako/universal_repartition_script7870
+#
+# Modified: also creates a MISC (BCB) partition, but ONLY on devices that
+# don't already have one in their PIT/GPT. Some Exynos7870 devices (e.g.
+# j7toplteskt) ship with a native MISC partition already; others (e.g.
+# a3y17lte / SM-A320FL) never had one. Without it, init/vold can't write
+# the bootloader control block, and on devices like a3y17lte a failed
+# write_bootloader_message() during an emergency "reboot into recovery"
+# (e.g. triggered by init_user0_failed during first-boot FBE setup)
+# escalates into InitFatalReboot (signal 6) instead of gracefully
+# booting to recovery. This is optional/conditional specifically so
+# running this on a device that already has MISC is a no-op for that
+# partition - it is left completely untouched.
+#
 
 # New partitions size in Mb. These values are the recommended. Feel free to mod them according your needs
-SYSTEMSIZE=2804
-VENDORSIZE=418
-CACHESIZE=32
+SYSTEMSIZE=4096
+VENDORSIZE=512
+CACHESIZE=64
+MISCSIZE=8 # Only used if the device has no MISC partition yet. 8 MiB is comfortably larger than the ~2KB bootloader_message struct AOSP actually writes there.
 #############
 
-ODMSIZE=16 # New ODM partition size for those devices having it. Mod this value at your own risk
+ODMSIZE=128 # New ODM partition size for those devices having it. Mod this value at your own risk
 
-SGDISK=/tmp/sgdisk
+SGDISK=/sbin/sgdisk
 DISK=/dev/block/mmcblk0
 
 CP_DEBUG=`$SGDISK --print $DISK | grep CP_DEBUG | awk '{printf $1}'`
@@ -34,6 +48,7 @@ NAD_REFER=`$SGDISK --print $DISK | grep NAD_REFER | awk '{printf $1}'`
 ODM=`$SGDISK --print $DISK | grep ODM | awk '{printf $1}'`
 OMR=`$SGDISK --print $DISK | grep OMR | awk '{printf $1}'`
 VENDOR=`$SGDISK --print $DISK | grep VENDOR | awk '{printf $1}'`
+MISC=`$SGDISK --print $DISK | grep -w MISC | awk '{printf $1}'`
 
 DISKCODE=`$SGDISK --print $DISK | grep SYSTEM | awk '{printf $6}'`
 SECSIZE=`$SGDISK --print $DISK | grep 'sector size' | awk '{printf $4}'`
@@ -56,7 +71,7 @@ function calculate() {
 	fi
 
 	# Get CACHE partition number and delete it
-    CACHEPART=`$SGDISK --print $DISK | grep CACHE | awk '{printf $1}'`
+	CACHEPART=`$SGDISK --print $DISK | grep CACHE | awk '{printf $1}'`
 	delete $CACHEPART
 	
 	# Get ODM partition number and delete it, if exists and is located after SYSTEM
@@ -111,14 +126,18 @@ function calculate() {
 		fi
 	fi
 	
+	# NOTE: MISC is intentionally NOT deleted here, even if present. If the
+	# device already has one, it is left completely alone (not touched at
+	# all, not even on devices where it happens to sit after SYSTEM).
+
 	# Get USERDATA partition number and delete it
-    DATAPART=`$SGDISK --print $DISK | grep USERDATA | awk '{printf $1}'`
+	DATAPART=`$SGDISK --print $DISK | grep USERDATA | awk '{printf $1}'`
 	delete $DATAPART
 }
 	
 function repart() {	
 	# SYSTEM repartition
-    $SGDISK --new=0:0:+${SYSTEMSIZE}Mib --typecode=0:$DISKCODE --change-name=0:SYSTEM $DISK
+	$SGDISK --new=0:0:+${SYSTEMSIZE}Mib --typecode=0:$DISKCODE --change-name=0:SYSTEM $DISK
 
 	# VENDOR repartition
 	$SGDISK --new=0:0:+${VENDORSIZE}Mib --typecode=0:$DISKCODE --change-name=0:VENDOR $DISK
@@ -128,7 +147,7 @@ function repart() {
 	
 	# ODM repartition if exist and is located after SYSTEM partition
 	if [ ! -z $ODM ] && [ $ODMPART -gt $SYSPART ]; then
-        $SGDISK --new=0:0:+${ODMSIZE}Mib --typecode=0:$DISKCODE --change-name=0:ODM $DISK
+		$SGDISK --new=0:0:+${ODMSIZE}Mib --typecode=0:$DISKCODE --change-name=0:ODM $DISK
 	fi
 
 	# OMR repartition if exist and is located after SYSTEM partition
@@ -137,18 +156,27 @@ function repart() {
 	fi	
 		
 	# CP_DEBUG repartition if exist and is located after SYSTEM partition
-    if [ ! -z $CP_DEBUG ] && [ $CPDPART -gt $SYSPART ]; then
-        $SGDISK --new=0:0:+$CPDSIZE --typecode=0:$DISKCODE --change-name=0:CP_DEBUG $DISK
+	if [ ! -z $CP_DEBUG ] && [ $CPDPART -gt $SYSPART ]; then
+		$SGDISK --new=0:0:+$CPDSIZE --typecode=0:$DISKCODE --change-name=0:CP_DEBUG $DISK
 	fi
 
 	# NAD_FW repartition if exist and is located after SYSTEM partition
-    if [ ! -z $NAD_FW ] && [ $NADFWPART -gt $SYSPART ]; then
-        $SGDISK --new=0:0:+$NADFWSIZE --typecode=0:$DISKCODE --change-name=0:NAD_FW $DISK
+	if [ ! -z $NAD_FW ] && [ $NADFWPART -gt $SYSPART ]; then
+		$SGDISK --new=0:0:+$NADFWSIZE --typecode=0:$DISKCODE --change-name=0:NAD_FW $DISK
 	fi	
 	
 	# NAD_REFER repartition if exist and is located after SYSTEM partition
 	if [ ! -z $NAD_REFER ] && [ $NADRFPART -gt $SYSPART ]; then
-        $SGDISK --new=0:0:+$NADRFSIZE --typecode=0:$DISKCODE --change-name=0:NAD_REFER $DISK
+		$SGDISK --new=0:0:+$NADRFSIZE --typecode=0:$DISKCODE --change-name=0:NAD_REFER $DISK
+	fi
+
+	# MISC: only create a new one if this device doesn't already have one.
+	# Must run before the USERDATA step below, since USERDATA claims all
+	# remaining free space (size 0) and would leave nothing for MISC
+	# otherwise. Devices that already had a MISC partition skip this
+	# entirely (it was never deleted above, so it's untouched).
+	if [ -z $MISC ]; then
+		$SGDISK --new=0:0:+${MISCSIZE}Mib --typecode=0:$DISKCODE --change-name=0:MISC $DISK
 	fi
 	
 	#USERDATA repartition
